@@ -15,31 +15,34 @@
    - Signature blocks: `By:`, `Name:`, `Title:`, `Date:` — pattern matching
    - Cross-references: `Section 4.2`, `Article III`, `Exhibit A` — regex + linking
 
-3. **No ML needed for v0.1-v0.3.** Rule-based extraction is sufficient for well-structured contracts (which is 90% of commercial contracts). ML can be added later for messy/scanned docs.
+3. **Rule-based gets us to 85-95% accuracy fast.** Sufficient for well-structured contracts (90% of commercial contracts). But we'll hit a ceiling on clause classification, party extraction, and messy documents.
 
-4. **Real risk:** Edge cases in numbering schemes and non-standard formatting. Mitigated by testing against diverse real contracts early.
+4. **ML/AI layer pushes us to 93-98%.** Fine-tuned classifiers for clause types, NER models for parties, LLM fallback for ambiguous cases. Added in Phase 4-5 after we have ground truth data from rule-based output.
+
+5. **Real risk:** Edge cases in numbering schemes and non-standard formatting. Mitigated by testing against diverse real contracts early.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        lexparse                               │
-│                                                               │
-│  ┌─────────────┐    ┌──────────────┐    ┌─────────────────┐  │
-│  │   Ingestor   │───▶│  Legal Engine │───▶│  Output Layer   │  │
-│  │              │    │              │    │                 │  │
-│  │ DoclingBack  │    │ ClauseDetect │    │ ContractJSON    │  │
-│  │ MarkerBack   │    │ DefExtract   │    │ LegalMarkdown   │  │
-│  │ PlainText    │    │ SectionTree  │    │ ClauseChunks    │  │
-│  │              │    │ ExhibitDetect│    │ DefinitionIndex │  │
-│  │              │    │ SignDetect   │    │                 │  │
-│  │              │    │ CrossRefLink │    │                 │  │
-│  │              │    │ PartyExtract │    │                 │  │
-│  └─────────────┘    └──────────────┘    └─────────────────┘  │
-│                                                               │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                            lexparse                                   │
+│                                                                       │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────┐   ┌───────────┐  │
+│  │   Ingestor   │──▶│ Rule Engine  │──▶│ ML Layer │──▶│  Output   │  │
+│  │              │   │              │   │ (optional)│   │           │  │
+│  │ DoclingBack  │   │ SectionTree  │   │          │   │ JSON      │  │
+│  │ MarkerBack   │   │ ClauseDetect │   │ Clause   │   │ Markdown  │  │
+│  │ PlainText    │   │ DefExtract   │   │ Classifr │   │ Chunks    │  │
+│  │              │   │ ExhibitDetect│   │ NER Party│   │ DefIndex  │  │
+│  │              │   │ SignDetect   │   │ Risk     │   │           │  │
+│  │              │   │ CrossRefLink │   │ Scorer   │   │           │  │
+│  │              │   │ PartyExtract │   │ LLM      │   │           │  │
+│  │              │   │              │   │ Fallback │   │           │  │
+│  └─────────────┘   └──────────────┘   └──────────┘   └───────────┘  │
+│                                                                       │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Layer 1: Ingestor (Parsing Backend)
@@ -582,7 +585,7 @@ lexparse/
 1. Implement `DefinitionExtractor`
 2. Implement `ExhibitDetector`
 3. Implement `SignatureDetector`
-4. Implement `PartyExtractor`
+4. Implement `PartyExtractor` (rule-based, preamble patterns)
 5. Implement `MetadataExtractor` (title, dates, governing law)
 6. Wire all into `LexParser`
 7. Test against 5 diverse contract PDFs
@@ -591,7 +594,7 @@ lexparse/
 
 ### Phase 3 — Output & Polish (Week 3)
 
-**Goal:** Multiple output formats, clause classification, cross-refs.
+**Goal:** Multiple output formats, clause classification (rule-based), cross-refs.
 
 1. Implement `ClauseType` classification (keyword patterns)
 2. Implement `CrossRefLinker`
@@ -603,36 +606,308 @@ lexparse/
 
 **Deliverable:** Full feature set, published to PyPI
 
-### Phase 4 — Multi-backend & Hardening (Week 4)
+### Phase 4 — Benchmarking: Rule-Based Baseline (Week 4)
 
-**Goal:** Marker backend, edge cases, batch processing.
+**Goal:** Measure rule-based accuracy across all components. This becomes our baseline.
+
+1. Build evaluation harness (`lexparse/eval/`)
+2. Annotate 30 contracts as ground truth (from EDGAR + public sources)
+3. Run rule-based pipeline, compute metrics per component
+4. Publish baseline results
+5. Identify where rules fail — these become ML targets
+
+**Deliverable:** Published baseline metrics, identified ML opportunities
+
+### Phase 5 — ML Layer: Clause Classifier (Week 5-6)
+
+**Goal:** Replace keyword-based clause classification with a fine-tuned model.
+
+1. Build training dataset from legal-clause-library + CUAD annotations
+2. Fine-tune a text classifier (options below)
+3. Integrate as optional ML layer: `LexParser(use_ml=True)`
+4. A/B test: rule-based vs ML classification
+5. Publish comparison metrics
+
+**Model options for clause classification:**
+| Model | Size | Approach | Pros | Cons |
+|-------|------|----------|------|------|
+| Legal-BERT | 110M | Fine-tune on clause types | Domain-specific, fast inference | Needs training data |
+| SetFit | 110M | Few-shot fine-tuning | Works with ~50 examples per class | Less accurate at scale |
+| sentence-transformers + logistic regression | ~30M | Embed → classify | Simple, fast, debuggable | No contextual understanding |
+| GPT/Claude via API | — | Zero-shot / few-shot prompt | No training needed, highest accuracy | Cost, latency, API dependency |
+
+**Recommended:** Start with SetFit (few-shot) for offline, add LLM fallback for low-confidence cases.
+
+### Phase 6 — ML Layer: NER & Party Extraction (Week 7)
+
+**Goal:** Replace regex party extraction with NER model.
+
+1. Fine-tune spaCy NER or use a legal NER model on:
+   - `PARTY_NAME` — entity names
+   - `PARTY_ALIAS` — defined aliases ("Company", "Buyer")
+   - `ENTITY_TYPE` — corporation, LLC, partnership
+   - `JURISDICTION` — state/country of incorporation
+   - `DATE` — effective dates, expiration dates
+   - `MONETARY` — caps, fees, thresholds
+2. Train on preamble text from annotated contracts
+3. Integrate: rule-based as primary, NER as enhancement
+4. Benchmark rule-based vs NER extraction
+
+**Model options:**
+| Model | Approach | Pros | Cons |
+|-------|----------|------|------|
+| spaCy NER (fine-tuned) | Token classification | Fast, local, well-supported | Needs ~200+ annotated examples |
+| GLiNER | Zero-shot NER | No training data needed | Lower accuracy on legal entities |
+| Legal-BERT + token classification | Fine-tune on legal NER | Domain-specific | More complex setup |
+
+### Phase 7 — ML Layer: Risk Scoring & LLM Fallback (Week 8-9)
+
+**Goal:** Add semantic understanding where rules can't reach.
+
+1. **Risk scorer** — classify clauses as `low / medium / high / critical` risk
+   - Use LLM (Claude/GPT) with structured output for risk assessment
+   - Score dimensions: party fairness, enforceability, common vs unusual language
+   - Cache results to reduce API costs
+
+2. **LLM fallback for low-confidence extractions**
+   - When rule-based confidence < threshold, send to LLM
+   - Structured prompt: "Extract the following from this contract section..."
+   - Works for: ambiguous definitions, complex party structures, unusual formatting
+
+3. **Document type classifier**
+   - Fine-tune on contract types: NDA, MSA, Employment, License, SaaS, Lease, etc.
+   - Use first 2 pages + title as input
+
+```python
+# User-facing API
+parser = LexParser(
+    backend="docling",
+    use_ml=True,              # Enable ML classifiers
+    llm_fallback=True,        # Use LLM for low-confidence cases
+    llm_provider="anthropic", # or "openai"
+    risk_scoring=True,        # Add risk scores to clauses
+)
+
+contract = parser.parse("agreement.pdf")
+
+for clause in contract.all_clauses():
+    print(f"{clause.number} [{clause.clause_type}]")
+    print(f"  Confidence: {clause.confidence}")        # 0.0-1.0
+    print(f"  Method: {clause.extraction_method}")      # "rule" | "ml" | "llm"
+    print(f"  Risk: {clause.risk_score}")               # low | medium | high | critical
+    print(f"  Risk reason: {clause.risk_reason}")       # "Uncapped liability with no carve-outs"
+```
+
+### Phase 8 — Multi-backend & Hardening (Week 10)
+
+**Goal:** Marker backend, edge cases, batch processing, production readiness.
 
 1. Implement `MarkerIngestor`
 2. Backend selection in `LexParser(backend="marker")`
-3. Test against 20+ contracts from EDGAR
+3. Test against 50+ contracts from EDGAR
 4. Handle edge cases: nested numbering, inconsistent formatting
-5. Add confidence scores to extractions
-6. Batch processing API
-7. Performance benchmarks
+5. Batch processing API
+6. Performance benchmarks (speed, memory, cost)
+7. Final metrics comparison: rule-based vs hybrid
 
-**Deliverable:** Production-ready v0.4
-
----
-
-## Key Risks & Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| Docling API changes between versions | Medium | Medium | Pin version, use thin adapter layer |
-| Non-standard numbering breaks section tree | High | Medium | Build a numbering pattern registry, fall back to heading-based detection |
-| Definition extraction misses inline definitions | Medium | Low | Start with quoted-term patterns (high precision), expand later |
-| Clause classification accuracy too low | Low | Low | Keyword patterns work well for standard clauses; ML classifier is a future add |
-| Scanned PDFs produce poor text | Medium | High | Defer to Phase 4, rely on Docling's built-in OCR |
-| Docling is too slow for large contracts | Medium | Medium | Add caching, lazy loading; Marker as fast alternative |
+**Deliverable:** Production-ready v1.0
 
 ---
 
-## Dependencies
+## Expected Metrics: Rule-Based vs Hybrid (ML + Rules)
+
+This is the core experiment. We measure each component with rules only, then with ML, to quantify the improvement.
+
+### Test Setup
+- **Test set:** 30 annotated contracts from EDGAR (NDA, MSA, Employment, License, SaaS, Lease)
+- **Annotation:** Manual ground truth for each component
+- **Metrics:** Precision, Recall, F1 per component
+
+### Projected Metrics
+
+| Component | Metric | Rule-Based (est.) | + ML (est.) | Delta | ML Method |
+|-----------|--------|-------------------|-------------|-------|-----------|
+| **Section hierarchy** | F1 | 0.93-0.96 | 0.95-0.97 | +2% | Minimal gain — rules already strong |
+| **Clause boundaries** | F1 | 0.90-0.94 | 0.94-0.97 | +4% | Token classifier for ambiguous boundaries |
+| **Definition extraction** | F1 | 0.90-0.93 | 0.93-0.96 | +3% | NER catches inline definitions rules miss |
+| **Clause classification** | Macro-F1 | 0.75-0.82 | 0.89-0.94 | +12% | **Biggest ML win** — fine-tuned classifier |
+| **Party extraction** | F1 | 0.80-0.87 | 0.91-0.95 | +8% | NER model for entity boundaries |
+| **Exhibit detection** | F1 | 0.95-0.98 | 0.96-0.98 | +1% | Minimal gain — rules already strong |
+| **Signature detection** | F1 | 0.93-0.97 | 0.95-0.98 | +2% | Minimal gain — rules already strong |
+| **Cross-ref linking** | Accuracy | 0.85-0.90 | 0.90-0.94 | +4% | LLM resolves ambiguous references |
+| **Document type** | Accuracy | 0.82-0.88 | 0.93-0.97 | +9% | Classifier on title + first 2 pages |
+| **Risk scoring** | — | N/A | 0.78-0.85 | — | LLM-only feature |
+
+### Where ML matters most (worth the complexity)
+
+```
+ML Improvement by Component:
+
+Clause classification  ████████████████████  +12%   ← HIGHEST ROI
+Document type          ██████████████        +9%
+Party extraction       ████████████          +8%
+Cross-ref linking      ████████              +4%
+Clause boundaries      ████████              +4%
+Definition extraction  ██████                +3%
+Section hierarchy      ████                  +2%
+Signature detection    ████                  +2%
+Exhibit detection      ██                    +1%
+```
+
+### Key takeaway
+
+**Rules dominate structure tasks** (section tree, exhibits, signatures) — ML adds <3%.
+**ML dominates understanding tasks** (clause classification, party extraction, risk) — +8-12%.
+
+This validates the hybrid approach: build rules first for fast, free, explainable extraction. Layer ML only where it measurably improves accuracy.
+
+### How we'll actually measure this
+
+```python
+# lexparse/eval/benchmark.py
+
+class LexParseBenchmark:
+    def __init__(self, ground_truth_dir: str):
+        self.ground_truth = self._load_annotations(ground_truth_dir)
+
+    def run(self, parser: LexParser, contracts: list[str]) -> BenchmarkResults:
+        """Run parser on contracts, compare against ground truth."""
+        results = {}
+        for contract_path in contracts:
+            predicted = parser.parse(contract_path)
+            truth = self.ground_truth[contract_path]
+
+            results[contract_path] = {
+                "section_hierarchy": self._eval_sections(predicted, truth),
+                "clause_boundaries": self._eval_clauses(predicted, truth),
+                "definitions": self._eval_definitions(predicted, truth),
+                "clause_classification": self._eval_classification(predicted, truth),
+                "party_extraction": self._eval_parties(predicted, truth),
+                "exhibits": self._eval_exhibits(predicted, truth),
+                "signatures": self._eval_signatures(predicted, truth),
+                "cross_references": self._eval_cross_refs(predicted, truth),
+            }
+        return BenchmarkResults(results)
+
+    def compare(self, results_a: BenchmarkResults, results_b: BenchmarkResults):
+        """Print side-by-side comparison table."""
+        ...
+```
+
+```bash
+# Run benchmark: rule-based vs hybrid
+python -m lexparse.eval.benchmark \
+    --ground-truth ./eval/ground_truth/ \
+    --contracts ./eval/contracts/ \
+    --modes rule_based hybrid \
+    --output ./eval/results/comparison.json
+```
+
+Output:
+```
+┌───────────────────────┬────────────┬────────────┬─────────┐
+│ Component             │ Rule-Based │ Hybrid     │ Delta   │
+├───────────────────────┼────────────┼────────────┼─────────┤
+│ Section hierarchy     │ F1: 0.95   │ F1: 0.96   │ +0.01   │
+│ Clause boundaries     │ F1: 0.92   │ F1: 0.95   │ +0.03   │
+│ Definition extraction │ F1: 0.91   │ F1: 0.94   │ +0.03   │
+│ Clause classification │ F1: 0.78   │ F1: 0.91   │ +0.13 ↑ │
+│ Party extraction      │ F1: 0.83   │ F1: 0.93   │ +0.10 ↑ │
+│ Exhibit detection     │ F1: 0.97   │ F1: 0.97   │ +0.00   │
+│ Signature detection   │ F1: 0.95   │ F1: 0.97   │ +0.02   │
+│ Cross-ref linking     │ Acc: 0.87  │ Acc: 0.92  │ +0.05   │
+│ Document type         │ Acc: 0.85  │ Acc: 0.95  │ +0.10 ↑ │
+├───────────────────────┼────────────┼────────────┼─────────┤
+│ Overall (weighted)    │ 0.89       │ 0.94       │ +0.05   │
+└───────────────────────┴────────────┴────────────┴─────────┘
+
+↑ = ML improvement > 5% (worth the complexity)
+```
+
+---
+
+## Repo Structure (updated with ML + eval)
+
+```
+lexparse/
+├── README.md
+├── LICENSE                        # Apache-2.0
+├── pyproject.toml
+├── lexparse/
+│   ├── __init__.py                # Public API: LexParser
+│   ├── parser.py                  # LexParser orchestrator
+│   ├── models.py                  # Pydantic models (Contract, Clause, etc.)
+│   ├── ingestors/
+│   │   ├── __init__.py
+│   │   ├── base.py                # Block, BaseIngestor
+│   │   ├── docling_ingestor.py
+│   │   └── marker_ingestor.py
+│   ├── engine/                    # Rule-based extractors
+│   │   ├── __init__.py
+│   │   ├── section_tree.py
+│   │   ├── clause_detector.py
+│   │   ├── definition_extractor.py
+│   │   ├── exhibit_detector.py
+│   │   ├── signature_detector.py
+│   │   ├── cross_ref_linker.py
+│   │   ├── party_extractor.py
+│   │   └── metadata_extractor.py
+│   ├── ml/                        # ML-enhanced extractors
+│   │   ├── __init__.py
+│   │   ├── clause_classifier.py   # Fine-tuned clause type classifier
+│   │   ├── ner_extractor.py       # Legal NER (parties, dates, monetary)
+│   │   ├── doc_type_classifier.py # Document type classification
+│   │   ├── risk_scorer.py         # LLM-based risk scoring
+│   │   ├── llm_fallback.py        # LLM fallback for low-confidence
+│   │   └── models/                # Saved model weights
+│   │       └── .gitkeep
+│   ├── output/
+│   │   ├── __init__.py
+│   │   ├── json_export.py
+│   │   ├── markdown_export.py
+│   │   └── chunker.py
+│   └── eval/                      # Benchmarking
+│       ├── __init__.py
+│       ├── benchmark.py           # Evaluation harness
+│       ├── metrics.py             # Precision, Recall, F1 calculators
+│       ├── annotator.py           # Annotation helper tool
+│       └── report.py              # Generate comparison tables
+├── eval/                          # Evaluation data (outside package)
+│   ├── contracts/                 # Test contract PDFs
+│   ├── ground_truth/              # Manual annotations (JSON)
+│   └── results/                   # Benchmark outputs
+├── training/                      # ML training scripts
+│   ├── train_clause_classifier.py
+│   ├── train_ner.py
+│   ├── train_doc_type.py
+│   └── data/                      # Training data
+├── tests/
+│   ├── conftest.py
+│   ├── fixtures/
+│   ├── test_section_tree.py
+│   ├── test_clause_detector.py
+│   ├── test_definition_extractor.py
+│   ├── test_exhibit_detector.py
+│   ├── test_signature_detector.py
+│   ├── test_cross_ref_linker.py
+│   ├── test_party_extractor.py
+│   ├── test_ml_classifier.py
+│   ├── test_ml_ner.py
+│   ├── test_integration.py
+│   ├── test_integration_ml.py
+│   └── test_output.py
+├── examples/
+│   ├── basic_usage.py
+│   ├── with_ml.py
+│   ├── rag_chunking.py
+│   └── batch_processing.py
+└── docs/
+    └── contract_json_schema.json
+```
+
+---
+
+## Dependencies (updated)
 
 ```toml
 [project]
@@ -645,47 +920,134 @@ dependencies = [
 [project.optional-dependencies]
 docling = ["docling>=2.0"]
 marker = ["marker-pdf>=1.0"]
-all = ["docling>=2.0", "marker-pdf>=1.0"]
+ml = [
+    "scikit-learn>=1.3",
+    "setfit>=1.0",
+    "sentence-transformers>=2.0",
+    "spacy>=3.7",
+]
+llm = [
+    "anthropic>=0.30",
+    "openai>=1.0",
+]
+all = [
+    "docling>=2.0",
+    "marker-pdf>=1.0",
+    "scikit-learn>=1.3",
+    "setfit>=1.0",
+    "sentence-transformers>=2.0",
+    "spacy>=3.7",
+    "anthropic>=0.30",
+    "openai>=1.0",
+]
 dev = ["pytest", "ruff", "mypy"]
 ```
 
-**Design choice:** Core lexparse has minimal deps (just pydantic). Parsing backends are optional extras. This keeps install fast and lets users pick their backend.
+**Install tiers:**
+- `pip install lexparse` — core only, pydantic models
+- `pip install "lexparse[docling]"` — rule-based parsing (most users)
+- `pip install "lexparse[docling,ml]"` — rule-based + ML classifiers
+- `pip install "lexparse[docling,ml,llm]"` — full hybrid with LLM fallback
+
+---
+
+## Key Risks & Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Docling API changes between versions | Medium | Medium | Pin version, use thin adapter layer |
+| Non-standard numbering breaks section tree | High | Medium | Build numbering pattern registry, fall back to heading-based detection |
+| Definition extraction misses inline definitions | Medium | Low | Start with quoted-term patterns (high precision), NER catches rest in Phase 6 |
+| Clause classification accuracy too low (rules) | High | Medium | Rules are baseline only — ML classifier in Phase 5 is the real solution |
+| ML training data insufficient | Medium | High | Bootstrap from CUAD + legal-clause-library, use SetFit for few-shot |
+| LLM costs too high for risk scoring | Medium | Medium | Cache aggressively, batch API calls, make it opt-in |
+| Scanned PDFs produce poor text | Medium | High | Defer to Phase 8, rely on Docling/Marker OCR |
+| Docling is too slow for large contracts | Medium | Medium | Add caching, lazy loading; Marker as fast alternative |
 
 ---
 
 ## Test Strategy
 
-1. **Unit tests:** Each engine component tested in isolation with hand-crafted `Block` lists
-2. **Integration tests:** Real PDF → full `Contract` pipeline, assertions on extracted data
-3. **Fixture contracts:** 5 real public contracts (NDA, MSA, Employment, License, SaaS) from EDGAR
-4. **Regression tests:** When a bug is found, add the failing contract as a fixture
-5. **No mocks for backends:** Integration tests hit real Docling/Marker — we need to know if they break
+### Unit tests
+Each engine component tested in isolation with hand-crafted `Block` lists.
+
+### Integration tests
+Real PDF → full `Contract` pipeline, assertions on extracted data.
+
+### Fixture contracts
+30 real public contracts (NDA, MSA, Employment, License, SaaS, Lease) from EDGAR.
+
+### Regression tests
+When a bug is found, add the failing contract as a fixture.
+
+### No mocks for backends
+Integration tests hit real Docling/Marker — we need to know if they break.
+
+### A/B evaluation (rule-based vs hybrid)
+Every component runs in both modes on the same test set. Results tracked in `eval/results/` with timestamps so we can see improvement over time.
+
+```
+eval/results/
+├── 2026-07-01_rule_based.json
+├── 2026-07-15_hybrid_v1.json
+├── 2026-08-01_hybrid_v2.json
+└── comparison_report.md
+```
 
 ---
 
-## What "Done" Looks Like (v0.4)
+## Timeline Summary (10 weeks)
+
+```
+Week 1     Phase 1: Foundation (rule-based parsing)
+Week 2     Phase 2: All extractors (rule-based)
+Week 3     Phase 3: Output layer + clause classification (keyword)
+Week 4     Phase 4: Benchmark rule-based baseline ← METRICS CHECKPOINT
+Week 5-6   Phase 5: ML clause classifier (SetFit / fine-tuned)
+Week 7     Phase 6: NER for parties, dates, entities
+Week 8-9   Phase 7: Risk scoring + LLM fallback
+Week 10    Phase 8: Multi-backend, hardening, final benchmark ← METRICS COMPARISON
+```
+
+---
+
+## What "Done" Looks Like (v1.0)
 
 ```bash
-pip install "lexparse[docling]"
+pip install "lexparse[docling,ml]"
 ```
 
 ```python
 from lexparse import LexParser
 
+# Rule-based only (fast, free, offline)
 parser = LexParser()
+contract = parser.parse("nda.pdf")
+
+# Hybrid mode (higher accuracy)
+parser = LexParser(use_ml=True, risk_scoring=True)
 contract = parser.parse("nda.pdf")
 
 assert contract.metadata.document_type == "NDA"
 assert len(contract.parties) == 2
 assert len(contract.definitions) > 0
 assert all(c.clause_type != "unknown" for c in contract.all_clauses())
-assert len(contract.exhibits) >= 0
+assert all(c.confidence > 0.7 for c in contract.all_clauses())
 assert len(contract.signatures) == 2
+
+# Every clause has risk scoring
+for clause in contract.all_clauses():
+    print(f"{clause.number} [{clause.clause_type}] risk={clause.risk_score}")
+    print(f"  method={clause.extraction_method} confidence={clause.confidence}")
 
 # RAG-ready
 chunks = contract.to_chunks(max_tokens=512)
 assert all(chunk["clause_type"] for chunk in chunks)
 assert all(chunk["section_ref"] for chunk in chunks)
+assert all(chunk["confidence"] for chunk in chunks)
 ```
 
-A developer can install lexparse, point it at any commercial contract PDF, and get back structured, clause-level data ready for RAG, review, or analysis — in under 30 seconds.
+The user chooses their tier:
+- **Rule-based** — fast, free, offline, ~89% overall accuracy
+- **Hybrid (ML)** — better classification + NER, ~94% overall accuracy
+- **Full (ML + LLM)** — risk scoring + fallback, ~96% accuracy + risk analysis
