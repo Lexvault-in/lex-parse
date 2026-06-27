@@ -3,6 +3,7 @@
 __version__ = "0.1.0"
 
 from lexparse.models import (
+    UNKNOWN_CLAUSE_TYPE,
     Clause,
     Contract,
     ContractMetadata,
@@ -15,7 +16,6 @@ from lexparse.models import (
     RiskLevel,
     Section,
     Signature,
-    UNKNOWN_CLAUSE_TYPE,
     get_clause_types,
     is_valid_clause_type,
     register_clause_type,
