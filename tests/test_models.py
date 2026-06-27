@@ -1,19 +1,17 @@
 """Tests for lexparse data models."""
 
 from lexparse.models import (
+    UNKNOWN_CLAUSE_TYPE,
     Clause,
     Contract,
     ContractMetadata,
     CrossRef,
     Definition,
     DocumentType,
-    Exhibit,
     ExtractionMethod,
     Party,
     RiskLevel,
     Section,
-    Signature,
-    UNKNOWN_CLAUSE_TYPE,
     get_clause_types,
     is_valid_clause_type,
     register_clause_type,
